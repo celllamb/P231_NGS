@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import subprocess
 import os
@@ -49,10 +51,27 @@ def create_combined_reference(references, output_dir, log=None):
     print_progress("Combined reference created.", log)
     return combined_ref
 
-def generate_bwa_index(combined_ref, cpu_count, log=None):
+def generate_bwa_index(combined_ref, log=None):
     print_progress("Generating BWA index...", log)
-    command = f"bwa index -a bwtsw -t {cpu_count} {combined_ref}"
-    run_command(command, log)
+    command = f"bwa index -a bwtsw {combined_ref}"
+    
+    start_time = time.time()
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    
+    while process.poll() is None:
+        # Check progress every 10 seconds
+        time.sleep(10)
+        elapsed_time = time.time() - start_time
+        file_size = os.path.getsize(combined_ref)
+        print_progress(f"Indexing in progress... Elapsed time: {elapsed_time:.0f} seconds. Reference file size: {file_size/1e6:.2f} MB", log)
+    
+    stdout, stderr = process.communicate()
+    
+    if process.returncode != 0:
+        print_progress(f"Error executing command: {command}", log)
+        print_progress(f"Error message: {stderr.decode()}", log)
+        raise subprocess.CalledProcessError(process.returncode, command, stderr)
+    
     print_progress("BWA index generated.", log)
 
 def run_bwa_mem(ref_file, read1, read2, output_dir, settings, cpu_count, log=None):
@@ -206,12 +225,11 @@ def main():
                 {"name": "strict", "params": "-B 12 -O 18,18 -E 3,3 -a"},
                 {"name": "very_strict", "params": "-B 16 -O 24,24 -E 4,4 -a"}
             ]
-            
             combined_ref = os.path.join(OUTPUT_DIR, "combined_reference.fa")
             
             if not args.skip_index:
                 combined_ref = create_combined_reference(REFERENCES, OUTPUT_DIR, log)
-                generate_bwa_index(combined_ref, cpu_count, log)
+                generate_bwa_index(combined_ref, log)
             else:
                 print_progress("Skipping BWA indexing step...", log)
                 if not os.path.exists(combined_ref):
