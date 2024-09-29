@@ -58,12 +58,14 @@ def generate_bwa_index(combined_ref, log=None):
     start_time = time.time()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     
+    previous_size = 0
     while process.poll() is None:
-        # Check progress every 10 seconds
-        time.sleep(10)
-        elapsed_time = time.time() - start_time
-        file_size = os.path.getsize(combined_ref)
-        print_progress(f"Indexing in progress... Elapsed time: {elapsed_time:.0f} seconds. Reference file size: {file_size/1e6:.2f} MB", log)
+        time.sleep(1)  # Check every second
+        current_size = os.path.getsize(combined_ref)
+        if current_size != previous_size:
+            elapsed_time = time.time() - start_time
+            print_progress(f"Indexing in progress... Elapsed time: {elapsed_time:.0f} seconds. Reference file size: {current_size/1e6:.2f} MB", log)
+            previous_size = current_size
     
     stdout, stderr = process.communicate()
     
