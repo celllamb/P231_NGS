@@ -6,22 +6,29 @@ This Python script is designed for the P231 study to analyze the proportion of s
 
 ## Features
 
-- Performs multi-species read mapping and analysis
-- Calculates species proportions with various metrics (Raw and Normalized proportions)
-- Supports multiple mapping stringency settings
-- Provides both raw and genome-size normalized proportions
-- Generates detailed results including primary, secondary, and supplementary alignments
-- Calculates statistics for total mapped reads across all species
-- Implements parallel processing for improved performance on large datasets
-- Dynamic chunk size determination for optimal memory usage
-- Generates visualizations of mapping results
+- Multi-species read mapping and analysis
+- Species proportion calculation with confidence intervals
+- Multiple mapping stringency settings
+- Genome-size normalized proportions
+
+## Alignment Definitions
+
+To better understand the analysis results, it's important to be familiar with the following alignment types:
+
+### Definitions
+
+- **Primary**: A read alignment that the aligner considers to be the "best" alignment. Each read can have at most one primary alignment across all species.
+- **Secondary**: Alternative alignments of a read that are not considered the best.
+- **Supplementary**: Alignments of parts of a read that did not align as part of the primary or secondary alignments.
+
+These definitions are crucial for interpreting the results of the multi-species genomic analysis. The tool primarily focuses on primary alignments to calculate species proportions, ensuring that each read contributes to only one species in the final analysis.
 
 ## Prerequisites
 
 - Python 3.6 or higher
 - BWA (Burrows-Wheeler Aligner)
 - Samtools
-- Python libraries: pandas, matplotlib, numpy, scipy, pysam, biopython, psutil
+- Python libraries: pandas, matplotlib, numpy, scipy, biopython
 
 ## Installation
 
@@ -33,10 +40,45 @@ This Python script is designed for the P231 study to analyze the proportion of s
 
 2. Install required Python libraries:
    ```bash
-   pip install pandas matplotlib numpy scipy pysam biopython psutil
+   pip install pandas matplotlib numpy scipy biopython
    ```
 
 3. Ensure BWA and Samtools are installed and accessible in your PATH.
+
+## Hardcoded Parameters
+
+The following parameters are hardcoded in the script. If you need to modify these, you'll need to edit the script directly.
+
+```python
+# Species analyzed
+species = ['beef', 'chicken', 'goat', 'horse', 'pork', 'sheep']
+
+# FASTA file names for each species
+FASTA_FILES = {
+    'beef': 'beef.fa',
+    'chicken': 'chicken.fa',
+    'goat': 'goat.fa',
+    'horse': 'horse.fa',
+    'pork': 'pork.fa',
+    'sheep': 'sheep.fa'
+}
+
+# Output directory
+OUTPUT_DIR = "output"
+
+# Sequencing read file names
+UNKNOWN_SAMPLE_R1 = "SM2_trim_1.fastq.gz"
+UNKNOWN_SAMPLE_R2 = "SM2_trim_2.fastq.gz"
+
+# Mapping settings
+MAPPING_SETTINGS = [
+    {"name": "default", "params": "-a"},
+    {"name": "strict", "params": "-B 12 -O 18,18 -E 3,3 -a"},
+    {"name": "very_strict", "params": "-B 16 -O 24,24 -E 4,4 -a"}
+]
+```
+
+These parameters define the species being analyzed, the input file names, output directory, and the different mapping stringency settings used in the analysis.
 
 ## Input Files
 
@@ -82,90 +124,87 @@ Ensure that all these files are present in the same directory as the script befo
 
 The script generates the following outputs in the `output` directory:
 
-1. `mapped_{setting}.bam`: BAM file of mapped reads for each mapping setting.
+1. `mapped_{setting}.bam`: BAM file of alignments for each mapping setting.
 2. `genome_sizes.txt`: Calculated genome sizes for each species.
 3. `reference_to_species_mapping.tsv`: Mapping of reference sequences to species.
-4. `detailed_results.tsv`: Comprehensive results including read counts, proportions, and various metrics.
-5. `enhanced_mapping_proportions.png`: Visualization of mapping results.
+4. `primary_alignment_results.tsv`: Comprehensive results including read counts, proportions, and various metrics.
+5. `primary_alignment_proportions.png`: Visualization of mapping results.
 6. `analysis_log.txt`: Detailed log of the analysis process with timestamps.
 
-## Read Classification Method
+## Species Proportion Calculations
 
-This section explains how reads are classified into primary, secondary, supplementary, multi_within, and multi_across categories.
+This tool calculates species proportions in two ways:
 
-### Definitions
+1. Raw Proportion: The number of primary alignments for a species divided by the total number of primary alignments across all species.
 
-- **Primary**: A read alignment that the aligner considers to be the "best" alignment. Each read can have at most one primary alignment across all species.
-- **Secondary**: Alternative alignments of a read that are not considered the best.
-- **Supplementary**: Alignments of parts of a read that did not align as part of the primary or secondary alignments.
-- **Total_Multi_Within**: The sum of all secondary and supplementary alignments within a single species' genome.
-- **Unique_Multi_Within**: The count of unique reads that have more than one alignment (including secondary and supplementary) within a single species' genome.
-- **Total_Multi_Across**: The sum of all alignments (primary, secondary, and supplementary) for reads that map to multiple species.
-- **Unique_Multi_Across**: The count of unique reads that have alignments to multiple species.
+2. Normalized Proportion: The raw proportion normalized by the genome size of each species. This accounts for differences in genome sizes between species.
 
-### Classification Process
+The calculations are performed as follows:
 
-1. For each alignment in the BAM file:
-   - Classify as Primary, Secondary, or Supplementary based on alignment flags.
-   - Record the species to which the read is mapped.
+```python
+raw_proportion = primary_reads / category_total
+normalized_proportion = (primary_reads / genome_size) / sum((primary_reads / genome_size) for all species)
+```
 
-2. After processing all alignments:
-   - Calculate Multi_Within and Multi_Across for each species.
-   - Compute Unique_Multi_Within and Unique_Multi_Across.
+Where:
+- `primary_reads` is the number of primary alignments for a species
+- `category_total` is the total number of primary alignments across all species
+- `genome_size` is the size of the genome for each species
 
-3. Calculate additional statistics:
-   - Total mapped reads, reads with/without primary alignments, primary alignment rate, etc.
+## Confidence Interval Calculations
 
-## Species Proportion Calculations and Interpretation
+Confidence intervals (CI) for the proportions are calculated using a multinomial distribution approach with bootstrapping. This method considers all species simultaneously, providing a more accurate estimation of uncertainty.
 
-Our analysis focuses on calculating the relative proportions of different species within the mapped reads. These proportions provide insights into the composition of the sample based on the sequencing data.
+The process is as follows:
 
-### Calculation of Category Totals
+1. Count the number of primary alignments for each species.
+2. Use these counts to define a multinomial distribution.
+3. Perform bootstrap sampling from this multinomial distribution.
+4. Calculate proportions for each bootstrapped sample.
+5. Use the 2.5th and 97.5th percentiles of these bootstrapped proportions as the lower and upper bounds of the 95% confidence interval for each species.
 
-- Total Primary Alignments: Sum of Primary alignments for all species
-- Total Secondary Alignments: Sum of Secondary alignments for all species
-- Total Supplementary Alignments: Sum of Supplementary alignments for all species
-- Total Mapped Reads: Sum of (Primary + Secondary + Supplementary) alignments for all species
-- Total Unique Multi Within: Sum of Unique Multi Within alignments for all species
-- Total Unique Multi Across: Sum of Unique Multi Across alignments for all species
+The code for this calculation is:
 
-Note: Total Mapped Reads represents the total number of all alignments, including multiple alignments of the same read. This may count some reads multiple times if they have multiple alignments.
+```python
+def calculate_multinomial_ci(counts, num_bootstraps=10000, confidence_level=0.95):
+    total = sum(counts)
+    probs = np.array(counts) / total
+    
+    bootstrapped_props = []
+    for _ in range(num_bootstraps):
+        sample = multinomial.rvs(n=total, p=probs)
+        bootstrapped_props.append(sample / total)
+    
+    bootstrapped_props = np.array(bootstrapped_props)
+    
+    ci_lower = np.percentile(bootstrapped_props, (1 - confidence_level) / 2 * 100, axis=0)
+    ci_upper = np.percentile(bootstrapped_props, (1 + confidence_level) / 2 * 100, axis=0)
+    
+    return ci_lower, ci_upper
+```
 
-### Raw Proportions
+### Advantages of the Multinomial Approach
 
-For each species, we calculate the following raw proportions:
+1. Simultaneous Consideration: All species are considered together, reflecting the interdependence of their proportions.
+2. Consistency: Ensures that the sum of proportions always equals 1, maintaining logical consistency.
+3. Accuracy: Provides more accurate confidence intervals, especially for species with low representation.
+4. Interpretability: Better reflects the nature of the data, where each read is assigned to exactly one species.
 
-1. **Raw_Primary_Proportion**: Primary alignments / Total Primary Alignments
-2. **Raw_Secondary_Proportion**: Secondary alignments / Total Secondary Alignments
-3. **Raw_Supplementary_Proportion**: Supplementary alignments / Total Supplementary Alignments
-4. **Raw_Unique_Multi_Within_Proportion**: Unique_Multi_Within / Total Unique Multi Within
-5. **Raw_Unique_Multi_Across_Proportion**: Unique_Multi_Across / Total Unique Multi Across
-6. **Raw_Total_Proportion**: (Primary + Secondary + Supplementary) / Total Mapped Reads
+These confidence intervals provide a range of plausible values for the true proportion of each species, with 95% confidence. The multinomial approach ensures that the uncertainty in all species proportions is considered collectively, providing a more robust statistical framework for interpretation.
 
-### Normalized Proportion
+## Performance Considerations
 
-To account for differences in genome sizes between species:
+- The script utilizes samtools for efficient BAM file processing.
+- Multi-threading is implemented for various stages of the analysis, including samtools operations:
+  - `samtools view` and `samtools sort` use the `-@` option to specify the number of threads.
+  - `samtools sort` memory usage:
+    - Memory per thread is set to 2GB (`-m 2G`)
+    - Total memory usage is approximately 2GB * (number of threads)
+    - This setting is optimized for large datasets, but may be excessive for smaller files
+- The calculation of primary alignment ratios is efficient, especially for large datasets.
+- The analysis of primary alignments uses samtools idxstats, which provides rapid statistics generation without reading through the entire BAM file.
 
-**Normalized_Proportion**: ((Primary + Secondary + Supplementary) / Genome Size) / Σ((Primary + Secondary + Supplementary) / Genome Size) for all species
-
-### Interpretation Guidelines
-
-- Each Raw Proportion category sums to 1 (or 100%) across all species.
-- Raw_Primary_Proportion indicates the distribution of best alignments among species.
-- Raw_Secondary_Proportion and Raw_Supplementary_Proportion show the distribution of alternative alignments.
-- Raw_Unique_Multi_Within_Proportion reveals how multi-mapping reads within a single species are distributed.
-- Raw_Unique_Multi_Across_Proportion shows the distribution of reads that map to multiple species.
-- Raw_Total_Proportion gives an overall view of how all alignments are distributed among species.
-- Normalized_Proportion is useful for comparing species with significantly different genome sizes.
-
-When interpreting results:
-1. Start with Raw_Total_Proportion for an overall view of species distribution.
-2. Compare Raw_Primary_Proportion to understand the distribution of best alignments.
-3. Use Raw_Unique_Multi_Within_Proportion and Raw_Unique_Multi_Across_Proportion to assess the level of ambiguous mappings.
-4. Refer to Normalized_Proportion for the most balanced comparison between species, especially if there are large differences in genome sizes.
-5. Always consider the actual read counts alongside the proportions for a comprehensive understanding.
-
-Remember that these proportions are based on all alignments, which may count some reads multiple times. The overall mapping rate (Total Mapped Reads / Total Input Reads) should be considered to assess the completeness of the analysis.
+Note: If you're working with smaller datasets or have limited system memory, you may want to adjust the memory usage for `samtools sort` in the script.
 
 ## Notes
 
@@ -179,7 +218,7 @@ Remember that these proportions are based on all alignments, which may count som
 
 If you encounter any issues:
 1. Check that all required input files are present and correctly named.
-2. Ensure all dependencies are installed and up to date.
+2. Ensure all dependencies (BWA, samtools, Python libraries) are installed and up to date.
 3. Review the `analysis_log.txt` file for detailed error messages and execution steps.
 4. If issues persist, please contact me with the log file and a description of the problem.
 
