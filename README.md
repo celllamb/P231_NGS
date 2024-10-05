@@ -11,6 +11,47 @@ This Python script is designed for the P231 study to analyze the proportion of s
 - Multiple mapping stringency settings
 - Genome-size normalized proportions
 
+## Workflow
+
+The script follows these main steps:
+
+1. **Initialization and Parameter Setting**
+   - Parse command-line arguments
+   - Set up logging
+   - Define species and file paths
+
+2. **Genome Size Calculation**
+   - Calculate or load genome sizes for each species
+   - Save genome sizes for future use
+
+3. **Reference Preparation**
+   - Create a combined reference genome from all species
+   - Generate BWA index for the combined reference (if not skipped)
+
+4. **Read Mapping**
+   - For each mapping setting (default, strict, very_strict):
+     - Map reads to the combined reference using BWA MEM
+     - Convert SAM to BAM, sort, and index the BAM file
+
+5. **Alignment Analysis**
+   - For each mapping setting:
+     - Calculate primary alignment ratio
+     - Analyze primary alignments and count reads per species
+
+6. **Data Processing and Calculations**
+   - Calculate raw and normalized proportions for each species
+   - Compute confidence intervals using bootstrap method
+
+7. **Results Output**
+   - Save detailed results to TSV file
+   - Generate visualization of mapping results
+
+8. **Logging and Cleanup**
+   - Log analysis completion
+   - Clean up temporary files (if any)
+
+This workflow is designed to efficiently process large genomic datasets and provide accurate species proportion estimates with associated confidence intervals.
+
 ## Alignment Definitions
 
 To better understand the analysis results, it's important to be familiar with the following alignment types:
@@ -51,17 +92,10 @@ The following parameters are hardcoded in the script. If you need to modify thes
 
 ```python
 # Species analyzed
-species = ['beef', 'chicken', 'goat', 'horse', 'pork', 'sheep']
+SPECIES = ['beef', 'chicken', 'goat', 'horse', 'pork', 'sheep']
 
 # FASTA file names for each species
-FASTA_FILES = {
-    'beef': 'beef.fa',
-    'chicken': 'chicken.fa',
-    'goat': 'goat.fa',
-    'horse': 'horse.fa',
-    'pork': 'pork.fa',
-    'sheep': 'sheep.fa'
-}
+FASTA_FILES = {sp: f"{sp}.fa" for sp in SPECIES}
 
 # Output directory
 OUTPUT_DIR = "output"
