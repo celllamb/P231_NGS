@@ -15,6 +15,18 @@ This Python script is designed for the P231 study to analyze the proportion of s
 
 The script follows these main steps:
 
+0. **Reference Sequence Preparation** (Performed before running this script)
+   - Map sequencing reads of individual meat samples to NCBI RefSeq
+   - Generate new reference sequences using the mapping results
+   - Example command for beef:
+     ```bash
+     bgzip BEEF_filtered.vcf
+     tabix -p vcf BEEF_filtered.vcf.gz
+     bcftools consensus -f GCF_002263795.3_ARS-UCD2.0_genomic.fna -o beef.fa BEEF_filtered.vcf.gz 2>&1 | tee log.txt
+     ```
+   - Repeat this process for each species (chicken, goat, horse, pork, sheep)
+   - Note: BEEF_filtered.vcf and similar files for other species are provided by the sequencing service provider
+
 1. **Initialization and Parameter Setting**
    - Parse command-line arguments
    - Set up logging
@@ -46,11 +58,10 @@ The script follows these main steps:
    - Save detailed results to TSV file
    - Generate visualization of mapping results
 
-8. **Logging and Cleanup**
+8. **Logging**
    - Log analysis completion
-   - Clean up temporary files (if any)
 
-This workflow is designed to efficiently process large genomic datasets and provide accurate species proportion estimates with associated confidence intervals.
+This workflow is designed to efficiently process large genomic datasets and provide accurate species proportion estimates with associated confidence intervals. The initial step (Step 0) ensures that the reference sequences used in the analysis are tailored to the specific samples being studied.
 
 ## Alignment Definitions
 
@@ -69,7 +80,7 @@ These definitions are crucial for interpreting the results of the multi-species 
 - Python 3.6 or higher
 - BWA (Burrows-Wheeler Aligner)
 - Samtools
-- Python libraries: pandas, matplotlib, numpy, scipy, biopython
+- Python libraries: matplotlib, scipy, biopython, numpy, pandas
 
 ## Installation
 
@@ -81,7 +92,7 @@ These definitions are crucial for interpreting the results of the multi-species 
 
 2. Install required Python libraries:
    ```bash
-   pip install pandas matplotlib numpy scipy biopython
+   pip install matplotlib scipy biopython numpy pandas
    ```
 
 3. Ensure BWA and Samtools are installed and accessible in your PATH.
@@ -106,13 +117,15 @@ UNKNOWN_SAMPLE_R2 = "SM2_trim_2.fastq.gz"
 
 # Mapping settings
 MAPPING_SETTINGS = [
-    {"name": "default", "params": "-a"},
-    {"name": "strict", "params": "-B 12 -O 18,18 -E 3,3 -a"},
-    {"name": "very_strict", "params": "-B 16 -O 24,24 -E 4,4 -a"}
+    {"name": "default", "params": ""},
+    {"name": "strict", "params": "-B 12 -O 18,18 -E 3,3"},
+    {"name": "very_strict", "params": "-B 16 -O 24,24 -E 4,4"}
 ]
 ```
 
 These parameters define the species being analyzed, the input file names, output directory, and the different mapping stringency settings used in the analysis.
+
+Note: The BWA MEM command does not include the "-a" option by default. If you need to output all alignments, you would need to add this option to the `params` field in the `MAPPING_SETTINGS`.
 
 ## Input Files
 
@@ -123,13 +136,15 @@ This tool requires specific input files to be present in the script's directory:
    - `SM2_trim_2.fastq.gz`: Reverse reads of the trimmed paired-end sequencing data
 
 2. **Reference Genomes**:
-   The following FASTA files should be present for each species:
+   The following FASTA files should be present for each species, generated using the process described in Step 0 of the Workflow:
    - `beef.fa`: Reference genome for beef (Bos taurus)
    - `chicken.fa`: Reference genome for chicken (Gallus gallus)
    - `goat.fa`: Reference genome for goat (Capra hircus)
    - `horse.fa`: Reference genome for horse (Equus caballus)
    - `pork.fa`: Reference genome for pork (Sus scrofa)
    - `sheep.fa`: Reference genome for sheep (Ovis aries)
+
+   Note: These reference genomes are created using filtered VCF files (e.g., BEEF_filtered.vcf) provided by the sequencing service provider and the corresponding NCBI RefSeq genomes.
 
 Ensure that all these files are present in the same directory as the script before running the analysis.
 
@@ -146,13 +161,12 @@ Ensure that all these files are present in the same directory as the script befo
    - `-i` or `--skip-index`: Skip the BWA indexing step
    - `-m` or `--skip-mapping`: Skip the BWA mapping step (implies -i)
    - `--force-recalculate`: Force recalculation of genome sizes
-   - `-r` or `--report-progress`: Report progress during analysis
 
    Example:
    ```bash
-   python map2ratio.py -m -r
+   python map2ratio.py -m
    ```
-   This will skip the mapping step, start from the analysis of existing BAM files, and report progress during the analysis.
+   This will skip the mapping step and start from the analysis of existing BAM files.
 
 ## Output
 
@@ -160,30 +174,33 @@ The script generates the following outputs in the `output` directory:
 
 1. `mapped_{setting}.bam`: BAM file of alignments for each mapping setting.
 2. `genome_sizes.txt`: Calculated genome sizes for each species.
-3. `reference_to_species_mapping.tsv`: Mapping of reference sequences to species.
-4. `primary_alignment_results.tsv`: Comprehensive results including read counts, proportions, and various metrics.
-5. `primary_alignment_proportions.png`: Visualization of mapping results.
-6. `analysis_log.txt`: Detailed log of the analysis process with timestamps.
+3. `detailed_results.tsv`: Comprehensive results including read counts, proportions, and various metrics.
+4. `alignment_proportions.png`: Visualization of mapping results.
+5. `analysis_log.txt`: Detailed log of the analysis process with timestamps.
 
 ## Species Proportion Calculations
 
-This tool calculates species proportions in two ways:
+This tool calculates species proportions based on the number of mapped reads relative to the total number of reads. It's important to note that only primary alignments are considered as mapped reads in these calculations.
 
-1. Raw Proportion: The number of primary alignments for a species divided by the total number of primary alignments across all species.
+The tool calculates species proportions in two ways:
+
+1. Raw Proportion: The number of primary alignments (mapped reads) for a species divided by the total number of primary alignments across all species.
 
 2. Normalized Proportion: The raw proportion normalized by the genome size of each species. This accounts for differences in genome sizes between species.
 
 The calculations are performed as follows:
 
 ```python
-raw_proportion = primary_reads / category_total
-normalized_proportion = (primary_reads / genome_size) / sum((primary_reads / genome_size) for all species)
+raw_proportion = mapped_reads / total_mapped_reads
+normalized_proportion = (mapped_reads / genome_size) / sum((mapped_reads / genome_size) for all species)
 ```
 
 Where:
-- `primary_reads` is the number of primary alignments for a species
-- `category_total` is the total number of primary alignments across all species
+- `mapped_reads` is the number of primary alignments for a species
+- `total_mapped_reads` is the total number of primary alignments across all species
 - `genome_size` is the size of the genome for each species
+
+Note: Only primary alignments are considered as mapped reads. Secondary and supplementary alignments are excluded from these calculations to ensure each read contributes to only one species in the final analysis.
 
 ## Confidence Interval Calculations
 
@@ -225,20 +242,6 @@ def calculate_multinomial_ci(counts, num_bootstraps=10000, confidence_level=0.95
 4. Interpretability: Better reflects the nature of the data, where each read is assigned to exactly one species.
 
 These confidence intervals provide a range of plausible values for the true proportion of each species, with 95% confidence. The multinomial approach ensures that the uncertainty in all species proportions is considered collectively, providing a more robust statistical framework for interpretation.
-
-## Performance Considerations
-
-- The script utilizes samtools for efficient BAM file processing.
-- Multi-threading is implemented for various stages of the analysis, including samtools operations:
-  - `samtools view` and `samtools sort` use the `-@` option to specify the number of threads.
-  - `samtools sort` memory usage:
-    - Memory per thread is set to 2GB (`-m 2G`)
-    - Total memory usage is approximately 2GB * (number of threads)
-    - This setting is optimized for large datasets, but may be excessive for smaller files
-- The calculation of primary alignment ratios is efficient, especially for large datasets.
-- The analysis of primary alignments uses samtools idxstats, which provides rapid statistics generation without reading through the entire BAM file.
-
-Note: If you're working with smaller datasets or have limited system memory, you may want to adjust the memory usage for `samtools sort` in the script.
 
 ## Notes
 
