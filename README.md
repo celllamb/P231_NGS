@@ -80,7 +80,8 @@ These definitions are crucial for interpreting the results of the multi-species 
 - Python 3.6 or higher
 - BWA (Burrows-Wheeler Aligner)
 - Samtools
-- Python libraries: matplotlib, scipy, biopython, numpy, pandas
+- seqkit
+- Python libraries: scipy, biopython, numpy, pandas
 
 ## Installation
 
@@ -92,10 +93,12 @@ These definitions are crucial for interpreting the results of the multi-species 
 
 2. Install required Python libraries:
    ```bash
-   pip install matplotlib scipy biopython numpy pandas
+   pip install scipy biopython numpy pandas
    ```
 
-3. Ensure BWA and Samtools are installed and accessible in your PATH.
+3. Ensure BWA, Samtools, and seqkit are installed and accessible in your PATH.
+
+   **Important Note**: Do not install seqkit using conda. The script may not function correctly if seqkit is installed via conda. Please install seqkit directly from its official source or using a package manager that adds it to your system PATH.
 
 ## Hardcoded Parameters
 

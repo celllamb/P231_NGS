@@ -12,6 +12,7 @@ import sys
 import time
 import traceback
 from Bio import SeqIO
+import shutil
 import warnings
 
 # Analysis Configuration Constants
@@ -94,52 +95,81 @@ def get_genome_sizes(SPECIES, fasta_files, output_dir, force_recalculate=False, 
     
     return genome_sizes
 
-def get_total_reads(fastq_file_r1, fastq_file_r2, cache_dir="cache"):
-    # Create cache directory if it doesn't exist
-    os.makedirs(cache_dir, exist_ok=True)
+
+def get_total_reads(fastq_file_r1, fastq_file_r2, output_dir, log=None):
+    seqkit_output = os.path.join(output_dir, "count.txt")
     
-    def count_reads(fastq_file):
-        # Generate a unique cache file name based on the input file and its modification time
-        file_stats = os.stat(fastq_file)
-        cache_file = os.path.join(cache_dir, f"{os.path.basename(fastq_file)}.{file_stats.st_mtime}.txt")
-        
-        # Check if cached result exists and use it if available
-        if os.path.exists(cache_file):
-            with open(cache_file, 'r') as f:
-                read_count = int(f.read().strip())
-            print(f"Using cached total read count for {fastq_file}: {read_count}")
-            return read_count
-        
-        # Count reads using Biopython
+    def compare_read_counts(r1_count, r2_count):
+        if r1_count != r2_count:
+            print_progress(f"Warning: Read counts for R1 ({r1_count}) and R2 ({r2_count}) do not match.", log)
+            total_read_pairs = min(r1_count, r2_count)
+            print_progress(f"Using the smaller count ({total_read_pairs}) as the total read pairs.", log)
+        else:
+            total_read_pairs = r1_count
+            print_progress(f"Read counts for R1 and R2 match: {total_read_pairs} read pairs.", log)
+        return total_read_pairs
+
+    def run_seqkit():
+        if shutil.which("seqkit") is None:
+            print_progress("seqkit is not installed or not in PATH. Falling back to manual counting.", log)
+            return False
+
+        cmd = f"seqkit stat {fastq_file_r1} {fastq_file_r2} -j 128 -o {seqkit_output}"
         try:
-            with gzip.open(fastq_file, "rt") as handle:
-                read_count = sum(1 for _ in SeqIO.parse(handle, "fastq"))
-            
-            # Cache the result for future use
-            with open(cache_file, 'w') as f:
-                f.write(str(read_count))
-            
-            print(f"Calculated and cached total read count for {fastq_file}: {read_count}")
-            return read_count
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            print_progress(f"seqkit command output: {result.stdout}", log)
+            return True
+        except subprocess.CalledProcessError as e:
+            print_progress(f"Error running seqkit: {e}", log)
+            print_progress(f"seqkit stderr: {e.stderr}", log)
+            print_progress("Falling back to manual counting.", log)
+            return False
+
+    def manual_count():
+        def count_reads(fastq_file):
+            try:
+                with gzip.open(fastq_file, "rt") as handle:
+                    return sum(1 for _ in SeqIO.parse(handle, "fastq"))
+            except Exception as e:
+                print_progress(f"Error processing file {fastq_file}: {str(e)}", log)
+                raise
+
+        print_progress("Manually counting reads...", log)
+        try:
+            r1_count = count_reads(fastq_file_r1)
+            r2_count = count_reads(fastq_file_r2)
+            return compare_read_counts(r1_count, r2_count)
         except Exception as e:
-            print(f"Error processing file {fastq_file}")
-            print(f"Error message: {str(e)}")
+            print_progress(f"Error during manual read counting: {str(e)}", log)
             raise
 
-    # Count reads for both R1 and R2
-    r1_count = count_reads(fastq_file_r1)
-    r2_count = count_reads(fastq_file_r2)
-
-    # Compare read counts and issue a warning if they don't match
-    if r1_count != r2_count:
-        print(f"Warning: Read counts for R1 ({r1_count}) and R2 ({r2_count}) do not match.")
-        total_read_pairs = min(r1_count, r2_count)
-        print(f"Using the smaller count ({total_read_pairs}) as the total read pairs.")
+    # Try to use seqkit first
+    use_seqkit = False
+    if os.path.exists(seqkit_output) and all(os.path.getmtime(seqkit_output) > os.path.getmtime(f) for f in [fastq_file_r1, fastq_file_r2]):
+        print_progress("Using existing seqkit count file.", log)
+        use_seqkit = True
     else:
-        total_read_pairs = r1_count
-        print(f"Read counts for R1 and R2 match: {total_read_pairs} read pairs.")
+        print_progress("Attempting to run seqkit to count reads...", log)
+        use_seqkit = run_seqkit()
 
-    return total_read_pairs
+    if use_seqkit:
+        try:
+            with open(seqkit_output, 'r') as f:
+                lines = f.readlines()[1:]  # Skip header
+            read_counts = [int(line.split()[3].replace(',', '')) for line in lines]
+            
+            if len(read_counts) != 2:
+                raise ValueError(f"Unexpected number of read count results: {len(read_counts)}")
+            
+            print_progress("Successfully parsed seqkit output.", log)
+            return compare_read_counts(read_counts[0], read_counts[1])
+        
+        except (ValueError, FileNotFoundError, IndexError) as e:
+            print_progress(f"Error parsing seqkit output: {str(e)}", log)
+            print_progress("Falling back to manual counting method.", log)
+            return manual_count()
+    else:
+        return manual_count()
 
 def create_combined_reference(references, output_dir, log=None):
     print_progress("Creating combined reference...", log)
@@ -184,62 +214,53 @@ def generate_bwa_index(combined_ref, log=None):
     
     print_progress("BWA index generated.", log)
 
-def run_bwa_mem(ref_file, read1, read2, output_dir, settings, cpu_count, log=None):
-    print_progress(f"Running BWA MEM with {settings['name']} settings...", log)
-    
+def run_bwa_mem(ref_file, read1, read2, output_dir, settings, cpu_count, skip_mapping=False, log=None):
     all_bam_file = os.path.join(output_dir, f"mapped_{settings['name']}.bam")
     
-    bwa_command = f"bwa mem -t {cpu_count} {settings['params']} {ref_file} {read1} {read2}"
-    view_command = "samtools view -b -"
-    sort_command = f"samtools sort -@ {cpu_count} -"
-    
-    with open(os.path.join(output_dir, f"bwa_mem_{settings['name']}_log.txt"), 'w') as bwa_log:
-        bwa_process = subprocess.Popen(bwa_command.split(), stdout=subprocess.PIPE, stderr=bwa_log)
-        view_process = subprocess.Popen(view_command.split(), stdin=bwa_process.stdout, stdout=subprocess.PIPE)
-        sort_process = subprocess.Popen(sort_command.split(), stdin=view_process.stdout, stdout=open(all_bam_file, 'wb'))
+    if not skip_mapping:
+        print_progress(f"Running BWA MEM with {settings['name']} settings...", log)
         
-        sort_process.communicate()
+        bwa_command = f"bwa mem -t {cpu_count} {settings['params']} {ref_file} {read1} {read2}"
+        view_command = "samtools view -b -"
+        sort_command = f"samtools sort -@ {cpu_count} -"
+        
+        with open(os.path.join(output_dir, f"bwa_mem_{settings['name']}_log.txt"), 'w') as bwa_log:
+            bwa_process = subprocess.Popen(bwa_command.split(), stdout=subprocess.PIPE, stderr=bwa_log)
+            view_process = subprocess.Popen(view_command.split(), stdin=bwa_process.stdout, stdout=subprocess.PIPE)
+            sort_process = subprocess.Popen(sort_command.split(), stdin=view_process.stdout, stdout=open(all_bam_file, 'wb'))
+            
+            sort_process.communicate()
+        
+        if sort_process.returncode != 0:
+            raise subprocess.CalledProcessError(sort_process.returncode, sort_command)
+        
+        run_command(f"samtools index {all_bam_file}", log)
     
-    if sort_process.returncode != 0:
-        raise subprocess.CalledProcessError(sort_process.returncode, sort_command)
+    # Calculate mapped read pairs
+    cmd_mapped = f"samtools view -c -f 3 -F 2316 {all_bam_file}"
+    mapped_read_pairs = max(0, int(subprocess.check_output(cmd_mapped, shell=True)) // 2)
     
-    run_command(f"samtools index {all_bam_file}", log)
-    
-    # Log mapped read counts
-    mapped_count = int(subprocess.check_output(f"samtools view -c -F 4 {all_bam_file}", shell=True))
-    print_progress(f"BWA MEM completed for {settings['name']} settings. Mapped reads: {mapped_count}", log)
-    return all_bam_file
+    print_progress(f"BWA MEM {'completed' if not skip_mapping else 'skipped'} for {settings['name']} settings. Mapped read pairs: {mapped_read_pairs}", log)
+    return all_bam_file, mapped_read_pairs
 
-def calculate_alignment_statistics(bam_file, total_read_pairs, log=None):
+def calculate_alignment_statistics(bam_file, total_read_pairs, mapped_read_pairs, log=None):
     print_progress(f"Calculating alignment statistics for {bam_file}...", log)
     
-    try:
-        # Count properly paired reads (only primary alignments, exclude secondary, supplementary, and unmapped)
-        cmd_mapped = f"samtools view -c -f 3 -F 2316 {bam_file}"
-        mapped_read_pairs = max(0, int(subprocess.check_output(cmd_mapped, shell=True)) // 2)
-        
-        # Calculate unmapped read pairs
-        unmapped_read_pairs = max(0, total_read_pairs - mapped_read_pairs)
-        
-        # Calculate mapping ratio
-        mapping_ratio = mapped_read_pairs / total_read_pairs if total_read_pairs > 0 else 0
-        
-        print_progress(f"Total read pairs: {total_read_pairs}", log)
-        print_progress(f"Mapped read pairs (primary alignments): {mapped_read_pairs}", log)
-        print_progress(f"Unmapped read pairs: {unmapped_read_pairs}", log)
-        print_progress(f"Mapping ratio: {mapping_ratio:.4f}", log)
-        
-        if mapped_read_pairs > total_read_pairs:
-            print_progress(f"Warning: Number of mapped read pairs ({mapped_read_pairs}) exceeds total read pairs count ({total_read_pairs})", log)
-        
-        return mapped_read_pairs, unmapped_read_pairs, mapping_ratio
+    # Calculate unmapped read pairs
+    unmapped_read_pairs = max(0, total_read_pairs - mapped_read_pairs)
     
-    except subprocess.CalledProcessError as e:
-        print_progress(f"Error executing samtools command: {e}", log)
-        raise
-    except ValueError as e:
-        print_progress(f"Error parsing samtools output: {e}", log)
-        raise
+    # Calculate mapping ratio
+    mapping_ratio = mapped_read_pairs / total_read_pairs if total_read_pairs > 0 else 0
+    
+    print_progress(f"Total read pairs: {total_read_pairs}", log)
+    print_progress(f"Mapped read pairs (primary alignments): {mapped_read_pairs}", log)
+    print_progress(f"Unmapped read pairs: {unmapped_read_pairs}", log)
+    print_progress(f"Mapping ratio: {mapping_ratio:.4f}", log)
+    
+    if mapped_read_pairs > total_read_pairs:
+        print_progress(f"Warning: Number of mapped read pairs ({mapped_read_pairs}) exceeds total read pairs count ({total_read_pairs})", log)
+    
+    return mapped_read_pairs, unmapped_read_pairs, mapping_ratio
 
 def analyze_alignments(bam_file, SPECIES, reference_to_species, genome_sizes, log=None):
     print_progress(f"Analyzing alignments for {bam_file}...", log)
@@ -378,15 +399,15 @@ def main():
             mapping_ratio = {}
 
             # Calculate total read pairs from FASTQ files
-            total_read_pairs = get_total_reads(UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2)
+            total_read_pairs = get_total_reads(UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2, OUTPUT_DIR, log)
             
             if not args.skip_mapping:
                 for settings in MAPPING_SETTINGS:
                     print_progress(f"\nProcessing {settings['name']} mapping...", log)
                     try:
-                        all_bam_file = run_bwa_mem(combined_ref, UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2, OUTPUT_DIR, settings, cpu_count, log)
+                        all_bam_file, mapped_read_pairs = run_bwa_mem(combined_ref, UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2, OUTPUT_DIR, settings, cpu_count, False, log)
                         
-                        mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, log)
+                        mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, mapped_read_pairs, log)
                         
                         analysis_results, _ = analyze_alignments(
                             all_bam_file, SPECIES, reference_to_species, genome_sizes, log
@@ -408,7 +429,9 @@ def main():
                         continue
                     
                     try:
-                        mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, log)
+                        _, mapped_read_pairs = run_bwa_mem(None, None, None, OUTPUT_DIR, settings, cpu_count, True, log)
+                        
+                        mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, mapped_read_pairs, log)
                         
                         analysis_results, _ = analyze_alignments(
                             all_bam_file, SPECIES, reference_to_species, genome_sizes, log
