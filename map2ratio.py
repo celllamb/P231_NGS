@@ -3,9 +3,9 @@
 import argparse
 import subprocess
 import os
+import gzip
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from scipy.stats import multinomial
 import multiprocessing
 import sys
@@ -94,27 +94,52 @@ def get_genome_sizes(SPECIES, fasta_files, output_dir, force_recalculate=False, 
     
     return genome_sizes
 
-def get_total_reads(fastq_file, cache_dir="cache"):
+def get_total_reads(fastq_file_r1, fastq_file_r2, cache_dir="cache"):
+    # Create cache directory if it doesn't exist
     os.makedirs(cache_dir, exist_ok=True)
     
-    file_stats = os.stat(fastq_file)
-    cache_file = os.path.join(cache_dir, f"{os.path.basename(fastq_file)}.{file_stats.st_mtime}.txt")
-    
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            total_reads = int(f.read().strip())
-        print(f"Using cached total read count for {fastq_file}")
-        return total_reads
-    
-    cpu_count = multiprocessing.cpu_count()
-    cmd_total_reads = f"seqkit stats -j {cpu_count} -T {fastq_file} | awk 'NR==2 {{print $4}}'"
-    total_reads = int(subprocess.check_output(cmd_total_reads, shell=True))
-    
-    with open(cache_file, 'w') as f:
-        f.write(str(total_reads))
-    
-    print(f"Calculated and cached total read count for {fastq_file}")
-    return total_reads
+    def count_reads(fastq_file):
+        # Generate a unique cache file name based on the input file and its modification time
+        file_stats = os.stat(fastq_file)
+        cache_file = os.path.join(cache_dir, f"{os.path.basename(fastq_file)}.{file_stats.st_mtime}.txt")
+        
+        # Check if cached result exists and use it if available
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r') as f:
+                read_count = int(f.read().strip())
+            print(f"Using cached total read count for {fastq_file}: {read_count}")
+            return read_count
+        
+        # Count reads using Biopython
+        try:
+            with gzip.open(fastq_file, "rt") as handle:
+                read_count = sum(1 for _ in SeqIO.parse(handle, "fastq"))
+            
+            # Cache the result for future use
+            with open(cache_file, 'w') as f:
+                f.write(str(read_count))
+            
+            print(f"Calculated and cached total read count for {fastq_file}: {read_count}")
+            return read_count
+        except Exception as e:
+            print(f"Error processing file {fastq_file}")
+            print(f"Error message: {str(e)}")
+            raise
+
+    # Count reads for both R1 and R2
+    r1_count = count_reads(fastq_file_r1)
+    r2_count = count_reads(fastq_file_r2)
+
+    # Compare read counts and issue a warning if they don't match
+    if r1_count != r2_count:
+        print(f"Warning: Read counts for R1 ({r1_count}) and R2 ({r2_count}) do not match.")
+        total_read_pairs = min(r1_count, r2_count)
+        print(f"Using the smaller count ({total_read_pairs}) as the total read pairs.")
+    else:
+        total_read_pairs = r1_count
+        print(f"Read counts for R1 and R2 match: {total_read_pairs} read pairs.")
+
+    return total_read_pairs
 
 def create_combined_reference(references, output_dir, log=None):
     print_progress("Creating combined reference...", log)
@@ -163,10 +188,21 @@ def run_bwa_mem(ref_file, read1, read2, output_dir, settings, cpu_count, log=Non
     print_progress(f"Running BWA MEM with {settings['name']} settings...", log)
     
     all_bam_file = os.path.join(output_dir, f"mapped_{settings['name']}.bam")
-    command = (f"bwa mem -t {cpu_count} {settings['params']} {ref_file} {read1} {read2} | "
-               f"samtools view -b - | "
-               f"samtools sort -@ {cpu_count} - > {all_bam_file}")
-    run_command(command, log)
+    
+    bwa_command = f"bwa mem -t {cpu_count} {settings['params']} {ref_file} {read1} {read2}"
+    view_command = "samtools view -b -"
+    sort_command = f"samtools sort -@ {cpu_count} -"
+    
+    with open(os.path.join(output_dir, f"bwa_mem_{settings['name']}_log.txt"), 'w') as bwa_log:
+        bwa_process = subprocess.Popen(bwa_command.split(), stdout=subprocess.PIPE, stderr=bwa_log)
+        view_process = subprocess.Popen(view_command.split(), stdin=bwa_process.stdout, stdout=subprocess.PIPE)
+        sort_process = subprocess.Popen(sort_command.split(), stdin=view_process.stdout, stdout=open(all_bam_file, 'wb'))
+        
+        sort_process.communicate()
+    
+    if sort_process.returncode != 0:
+        raise subprocess.CalledProcessError(sort_process.returncode, sort_command)
+    
     run_command(f"samtools index {all_bam_file}", log)
     
     # Log mapped read counts
@@ -294,58 +330,6 @@ def save_primary_alignment_results(results, total_read_pairs, primary_mapped_rea
     
     print_progress(f"Primary alignment results saved to {output_file}", log)
 
-def plot_primary_alignment_results(results, output_dir, genome_sizes, log=None):
-    print_progress("Plotting primary alignment results...", log)
-    fig, axes = plt.subplots(len(results), 2, figsize=(20, 10*len(results)), squeeze=False)
-    
-    for idx, (setting, data) in enumerate(results.items()):
-        df = pd.DataFrame({
-            'Species': SPECIES,
-            'Mapped_Read_Pairs': [data[sp]['Mapped'] for sp in SPECIES],
-            'Raw_Proportion': [data[sp]['Raw_Proportion'] for sp in SPECIES],
-            'Normalized_Proportion': [data[sp]['Normalized_Proportion'] for sp in SPECIES]
-        })
-        df = df.sort_values('Raw_Proportion', ascending=False)
-        
-        counts = df['Mapped_Read_Pairs'].values
-        raw_ci_lower, raw_ci_upper = calculate_multinomial_ci(counts)
-        normalized_counts = np.round((df['Mapped_Read_Pairs'] / [genome_sizes[sp] for sp in df['Species']]).values * 1e6).astype(int)
-        norm_ci_lower, norm_ci_upper = calculate_multinomial_ci(normalized_counts)
-        
-        # Raw proportions plot
-        ax = axes[idx, 0]
-        yerr_lower = df['Raw_Proportion'] - raw_ci_lower
-        yerr_upper = raw_ci_upper - df['Raw_Proportion']
-        yerr = np.array([yerr_lower, yerr_upper])
-        df.plot(kind='bar', x='Species', y='Raw_Proportion', ax=ax, yerr=yerr, capsize=5)
-        ax.set_title(f'{setting.capitalize()} Raw Alignment Proportions')
-        ax.set_ylabel('Proportion of Mapped Read Pairs')
-        ax.set_ylim(0, 1)
-        
-        for i, row in df.iterrows():
-            ax.text(i, row['Raw_Proportion'], f'{row["Raw_Proportion"]:.2%}', ha='center', va='bottom')
-        
-        # Normalized proportions plot
-        ax = axes[idx, 1]
-        yerr_lower = df['Normalized_Proportion'] - norm_ci_lower
-        yerr_upper = norm_ci_upper - df['Normalized_Proportion']
-        yerr = np.array([yerr_lower, yerr_upper])
-        df.plot(kind='bar', x='Species', y='Normalized_Proportion', ax=ax, yerr=yerr, capsize=5)
-        ax.set_title(f'{setting.capitalize()} Normalized Alignment Proportions')
-        ax.set_ylabel('Normalized Proportion of Mapped Read Pairs')
-        ax.set_ylim(0, 1)
-        
-        for i, row in df.iterrows():
-            ax.text(i, row['Normalized_Proportion'], f'{row["Normalized_Proportion"]:.2%}', ha='center', va='bottom')
-        
-        for ax in axes[idx]:
-            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'alignment_proportions.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    print_progress("Alignment results plot saved.", log)
-
 def main():
     parser = argparse.ArgumentParser(description="Multi-species Genomic Analysis Tool")
     parser.add_argument('-i', '--skip-index', action='store_true', help="Skip BWA indexing step")
@@ -394,17 +378,16 @@ def main():
             mapping_ratio = {}
 
             # Calculate total read pairs from FASTQ files
-            total_reads = get_total_reads(UNKNOWN_SAMPLE_R1)
-            total_read_pairs = total_reads // 2
-
+            total_read_pairs = get_total_reads(UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2)
+            
             if not args.skip_mapping:
                 for settings in MAPPING_SETTINGS:
                     print_progress(f"\nProcessing {settings['name']} mapping...", log)
-                    all_bam_file = run_bwa_mem(combined_ref, UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2, OUTPUT_DIR, settings, cpu_count, log)
-                    
-                    mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, log)
-                    
                     try:
+                        all_bam_file = run_bwa_mem(combined_ref, UNKNOWN_SAMPLE_R1, UNKNOWN_SAMPLE_R2, OUTPUT_DIR, settings, cpu_count, log)
+                        
+                        mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, log)
+                        
                         analysis_results, _ = analyze_alignments(
                             all_bam_file, SPECIES, reference_to_species, genome_sizes, log
                         )
@@ -413,18 +396,20 @@ def main():
                         unmapped_read_pairs[settings['name']] = unmapped
                         mapping_ratio[settings['name']] = ratio
                     except Exception as e:
-                        print_progress(f"Error in analyze_alignments for {settings['name']}: {str(e)}", log)
-                        raise
+                        print_progress(f"Error in mapping process for {settings['name']}: {str(e)}", log)
+                        print_progress("Continuing with next mapping setting...", log)
+                        continue
             else:
                 print_progress("Skipping BWA mapping step...", log)
                 for settings in MAPPING_SETTINGS:
                     all_bam_file = os.path.join(OUTPUT_DIR, f"mapped_{settings['name']}.bam")
                     if not os.path.exists(all_bam_file):
-                        raise FileNotFoundError(f"BAM file not found: {all_bam_file}")
-                    
-                    mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, log)
+                        print_progress(f"Warning: BAM file not found: {all_bam_file}. Skipping this setting.", log)
+                        continue
                     
                     try:
+                        mapped_read_pairs, unmapped, ratio = calculate_alignment_statistics(all_bam_file, total_read_pairs, log)
+                        
                         analysis_results, _ = analyze_alignments(
                             all_bam_file, SPECIES, reference_to_species, genome_sizes, log
                         )
@@ -434,10 +419,10 @@ def main():
                         mapping_ratio[settings['name']] = ratio
                     except Exception as e:
                         print_progress(f"Error in analyze_alignments for {settings['name']}: {str(e)}", log)
-                        raise
+                        print_progress("Continuing with next mapping setting...", log)
+                        continue
 
             save_primary_alignment_results(results, total_read_pairs, primary_mapped_read_pairs, unmapped_read_pairs, mapping_ratio, OUTPUT_DIR, genome_sizes, log)
-            plot_primary_alignment_results(results, OUTPUT_DIR, genome_sizes, log)
             
             print_progress(f"Analysis complete. Results are in {OUTPUT_DIR}", log)
 

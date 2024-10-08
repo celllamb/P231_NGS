@@ -40,7 +40,8 @@ The script follows these main steps:
    - Create a combined reference genome from all species
    - Generate BWA index for the combined reference (if not skipped)
 
-4. **Read Mapping**
+4. **Read Counting and Mapping**
+   - Calculate total number of read pairs from input FASTQ files
    - For each mapping setting (default, strict, very_strict):
      - Map reads to the combined reference using BWA MEM
      - Convert SAM to BAM, sort, and index the BAM file
@@ -56,7 +57,6 @@ The script follows these main steps:
 
 7. **Results Output**
    - Save detailed results to TSV file
-   - Generate visualization of mapping results
 
 8. **Logging**
    - Log analysis completion
@@ -125,7 +125,7 @@ MAPPING_SETTINGS = [
 
 These parameters define the species being analyzed, the input file names, output directory, and the different mapping stringency settings used in the analysis.
 
-Note: The BWA MEM command does not include the "-a" option by default. If you need to output all alignments, you would need to add this option to the `params` field in the `MAPPING_SETTINGS`.
+Note: The BWA MEM command uses the parameters specified in the `MAPPING_SETTINGS`. If you need to modify these settings, you can edit the `MAPPING_SETTINGS` in the script.
 
 ## Input Files
 
@@ -175,8 +175,7 @@ The script generates the following outputs in the `output` directory:
 1. `mapped_{setting}.bam`: BAM file of alignments for each mapping setting.
 2. `genome_sizes.txt`: Calculated genome sizes for each species.
 3. `detailed_results.tsv`: Comprehensive results including read counts, proportions, and various metrics.
-4. `alignment_proportions.png`: Visualization of mapping results.
-5. `analysis_log.txt`: Detailed log of the analysis process with timestamps.
+4. `analysis_log.txt`: Detailed log of the analysis process with timestamps.
 
 ## Species Proportion Calculations
 
